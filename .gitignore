@@ -1,0 +1,44 @@
+# Dependency directories
+node_modules/
+
+# Build output
+dist/
+.vite/
+
+# Environment files
+.env
+.env.*
+!.env.sample
+!.env.example
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Editor & system files
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.log
+
+# TypeScript incremental metadata
+tsconfig.tsbuildinfo
+node_modules/.cache/
+
+# Storybook / testing artifacts
+coverage/
+storybook-static/
+
+# AI Config
+AGENTS.md
+CLAUDE.md
+./codex
+./claude
