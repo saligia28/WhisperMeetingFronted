@@ -2,6 +2,7 @@ import { mockMeetings, mockSegments, mockSummary } from "../mockData";
 import type { Meeting, MeetingSummary, TranscriptSegment } from "../types";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
+const allowMocks = (import.meta.env.VITE_ENABLE_MOCK_FALLBACK ?? "false") === "true";
 
 type TranscriptApiSegment = {
   start: number;
@@ -18,8 +19,8 @@ async function safeFetch<T>(input: RequestInfo | URL, init?: RequestInit, fallba
     }
     return (await response.json()) as T;
   } catch (error) {
-    console.warn("[api] Falling back to mock data:", error);
-    if (fallback) {
+    if (fallback && allowMocks) {
+      console.warn("[api] Falling back to mock data:", error);
       return fallback();
     }
     throw error;
@@ -30,8 +31,44 @@ export async function fetchMeetings(): Promise<Meeting[]> {
   return safeFetch(
     `${API_BASE_URL}/meetings`,
     undefined,
-    () => mockMeetings,
+    allowMocks ? () => mockMeetings : undefined,
   );
+}
+
+export async function createMeeting(payload: { title?: string; language?: string | null } = {}): Promise<Meeting> {
+  const response = await fetch(`${API_BASE_URL}/meetings`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    if (allowMocks) {
+      console.warn("[api] Create meeting fallback:", response.statusText);
+      return mockMeetings[0];
+    }
+    throw new Error(`Create meeting failed with status ${response.status}`);
+  }
+
+  return (await response.json()) as Meeting;
+}
+
+export async function deleteMeeting(meetingId: string): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/meetings/${meetingId}`, {
+    method: "DELETE",
+  });
+
+  if (response.status === 404) {
+    throw new Error("会议不存在或已删除。");
+  }
+
+  if (!response.ok) {
+    if (allowMocks) {
+      console.warn("[api] Delete meeting fallback:", response.statusText);
+      return;
+    }
+    throw new Error(`Delete meeting failed with status ${response.status}`);
+  }
 }
 
 export async function fetchSummary(meetingId: string): Promise<MeetingSummary> {
@@ -48,8 +85,11 @@ export async function fetchSummary(meetingId: string): Promise<MeetingSummary> {
       keywords: extractSection(markdown, "关键词"),
     };
   } catch (error) {
-    console.warn("[api] Summary fallback:", error);
-    return mockSummary;
+    if (allowMocks) {
+      console.warn("[api] Summary fallback:", error);
+      return mockSummary;
+    }
+    throw error instanceof Error ? error : new Error("Failed to load summary");
   }
 }
 
@@ -67,33 +107,59 @@ export async function uploadTranscription(meetingId: string, file: Blob): Promis
     }
 
     const data = await response.json();
-    return (data.highlights ?? []).map((item: any, index: number) => ({
-      id: `trans-${index}`,
-      speaker: item.speaker ?? "Speaker",
-      text: typeof item === "string" ? item : item.text ?? "",
-      start: item.start ?? 0,
-      end: item.end ?? 0,
+    const segments: TranscriptApiSegment[] = data.segments ?? [];
+    return segments.map((segment, index) => ({
+      id: `remote-${meetingId}-${Date.now()}-${index}`,
+      speaker: segment.speaker ?? "Speaker",
+      text: segment.text,
+      start: segment.start ?? 0,
+      end: segment.end ?? 0,
       createdAt: Date.now(),
     }));
   } catch (error) {
-    console.warn("[api] Transcribe fallback:", error);
-    return mockSegments;
+    if (allowMocks) {
+      console.warn("[api] Transcribe fallback:", error);
+      return mockSegments;
+    }
+    throw error instanceof Error ? error : new Error("Transcribe failed");
   }
 }
 
-export async function fetchTranscriptSegments(meetingId: string): Promise<TranscriptSegment[]> {
-  const fallback = () =>
-    mockSegments.map((segment) => ({
-      start: segment.start,
-      end: segment.end,
-      text: segment.text,
-      speaker: segment.speaker,
-    }));
+export async function streamTranscription(
+  meetingId: string,
+  file: Blob,
+  offsetSec: number,
+): Promise<TranscriptApiSegment[]> {
+  const formData = new FormData();
+  formData.append("audio", file, "chunk.webm");
 
+  const offsetParam = Number.isFinite(offsetSec) ? Number(offsetSec.toFixed(3)) : 0;
+  const response = await fetch(`${API_BASE_URL}/meetings/${meetingId}/transcribe/chunk?offset=${offsetParam}`, {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!response.ok) {
+    throw new Error(`Stream transcribe failed with status ${response.status}`);
+  }
+
+  const payload = await response.json();
+  return (payload.segments ?? []) as TranscriptApiSegment[];
+}
+
+export async function fetchTranscriptSegments(meetingId: string): Promise<TranscriptSegment[]> {
   const rawSegments = await safeFetch<TranscriptApiSegment[]>(
     `${API_BASE_URL}/meetings/${meetingId}/transcript`,
     undefined,
-    fallback,
+    allowMocks
+      ? () =>
+          mockSegments.map((segment) => ({
+            start: segment.start,
+            end: segment.end,
+            text: segment.text,
+            speaker: segment.speaker,
+          }))
+      : undefined,
   );
 
   return rawSegments.map((segment, index) => ({

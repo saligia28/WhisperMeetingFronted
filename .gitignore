@@ -33,6 +33,12 @@ Thumbs.db
 tsconfig.tsbuildinfo
 node_modules/.cache/
 
+# TypeScript compiled output (should only commit .ts/.tsx source files)
+src/**/*.js
+src/**/*.d.ts
+*.config.js
+*.config.d.ts
+
 # Storybook / testing artifacts
 coverage/
 storybook-static/
@@ -40,5 +46,5 @@ storybook-static/
 # AI Config
 AGENTS.md
 CLAUDE.md
-./codex
-./claude
+.codex/
+.claude/

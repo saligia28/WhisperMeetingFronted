@@ -13,6 +13,8 @@ npm run dev
 
 ```bash
 echo "VITE_API_BASE_URL=http://localhost:8000" > .env.local
+# 仅在需要本地演示数据时手动设为 true；默认禁用 Mock 回退
+echo "VITE_ENABLE_MOCK_FALLBACK=false" >> .env.local
 ```
 
 ### 生产构建
@@ -25,7 +27,8 @@ npm run preview
 ## 主要功能
 
 - **录音控制**：基于 `MediaRecorder` 的一键录音/停止，自动上传至 `/meetings/{id}/transcribe`；支持导入本地音频文件。
-- **实时字幕**：Figma 风格的字幕卡片，录音时模拟实时滚动，后端上线后可切换为轮询或 WebSocket。
+- **实时字幕**：录音过程中每隔 4 秒调用 `/meetings/{id}/transcribe/chunk` 获取即时字幕，停止后自动触发完整转写与摘要流程。
+- **字幕体验**：Figma 风格的字幕卡片配合滚动状态指示，可在没有后端时通过模拟数据演示。
 - **重点标记**：在字幕流内直接标记关键语句，展示于“重点标记”面板，后续可接入后端存储。
 - **摘要与导出**：调用 `/meetings/{id}/summary` 获取 Markdown，解析摘要、行动项、关键词，支持下载 Markdown。
 - **企业风格设计**：应用自定义 Tailwind 主题、柔和渐变背景、细腻过渡动画，贴近大型企业设计语言。
@@ -36,7 +39,7 @@ npm run preview
 src/
 ├── components/        # UI 组件
 ├── hooks/             # 录音 & 模拟数据的自定义 Hook
-├── services/api.ts    # 与后端 API 交互的封装（内置 Mock 回退）
+├── services/api.ts    # 与后端 API 交互的封装（支持可选 Mock 回退）
 ├── mockData.ts        # 演示数据
 ├── App.tsx            # 页面布局与状态管理
 └── styles.css         # Tailwind 入口与全局样式

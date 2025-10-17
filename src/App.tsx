@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bars3Icon } from "@heroicons/react/24/outline";
 import clsx from "clsx";
@@ -11,11 +11,40 @@ import { SummaryPanel } from "./components/SummaryPanel";
 import { ExportPanel } from "./components/ExportPanel";
 import { useMediaRecorder } from "./hooks/useMediaRecorder";
 import { useTranscriptSimulation } from "./hooks/useTranscriptSimulation";
-import { fetchMeetings, fetchSummary, fetchTranscriptSegments, uploadTranscription } from "./services/api";
+import {
+  createMeeting,
+  deleteMeeting,
+  fetchMeetings,
+  fetchSummary,
+  fetchTranscriptSegments,
+  streamTranscription,
+  uploadTranscription,
+} from "./services/api";
 import type { Highlight, Meeting, MeetingSummary, TranscriptSegment } from "./types";
 
 const gradient =
   "bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.15),_transparent_55%),radial-gradient(circle_at_bottom,_rgba(165,180,252,0.2),_transparent_60%)]";
+
+const segmentsAreEqual = (current: TranscriptSegment[], next: TranscriptSegment[]) => {
+  if (current.length !== next.length) {
+    return false;
+  }
+  for (let index = 0; index < current.length; index += 1) {
+    const a = current[index];
+    const b = next[index];
+    if (
+      a.id !== b.id ||
+      a.text !== b.text ||
+      a.start !== b.start ||
+      a.end !== b.end ||
+      a.speaker !== b.speaker ||
+      a.createdAt !== b.createdAt
+    ) {
+      return false;
+    }
+  }
+  return true;
+};
 
 export default function App() {
   const queryClient = useQueryClient();
@@ -24,6 +53,11 @@ export default function App() {
   const [highlights, setHighlights] = useState<Highlight[]>([]);
   const [latestBlob, setLatestBlob] = useState<Blob | null>(null);
   const [banner, setBanner] = useState<{ message: string; tone: "info" | "success" | "error" } | null>(null);
+  const mockFallbackEnabled = (import.meta.env.VITE_ENABLE_MOCK_FALLBACK ?? "false") === "true";
+  const streamOffsetRef = useRef(0);
+  const streamQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const streamSeqRef = useRef(0);
+  const [isStreamingPending, setIsStreamingPending] = useState(false);
 
   const { data: meetings = [], isLoading: loadingMeetings } = useQuery({
     queryKey: ["meetings"],
@@ -77,6 +111,55 @@ export default function App() {
     return new Map(segments.map((segment) => [segment.id, segment]));
   }, [segments]);
 
+  const handleStreamChunk = useCallback(
+    (blob: Blob, durationSec: number) => {
+      if (mockFallbackEnabled) {
+        return;
+      }
+      if (!selectedMeetingId) {
+        setBanner({ tone: "error", message: "请先选择会议后再开始录音。" });
+        return;
+      }
+
+      streamQueueRef.current = streamQueueRef.current
+        .then(async () => {
+          setIsStreamingPending(true);
+          const offset = streamOffsetRef.current;
+          try {
+            const rawSegments = await streamTranscription(selectedMeetingId, blob, offset);
+            const now = Date.now();
+            const enriched = rawSegments.map((segment, index) => ({
+              id: `stream-${selectedMeetingId}-${streamSeqRef.current++}`,
+              speaker: segment.speaker ?? `Speaker ${index + 1}`,
+              text: segment.text,
+              start: segment.start ?? offset,
+              end: segment.end ?? segment.start ?? offset,
+              createdAt: now,
+            }));
+
+            const chunkEnd = enriched.length > 0 ? Math.max(...enriched.map((segment) => segment.end)) : offset + durationSec;
+            streamOffsetRef.current = Math.max(streamOffsetRef.current, chunkEnd);
+
+            if (enriched.length > 0) {
+              setSegments((current) => {
+                const merged = [...current, ...enriched];
+                return merged.sort((a, b) => a.start - b.start);
+              });
+            }
+          } catch (error) {
+            const message = error instanceof Error ? error.message : "实时转写失败";
+            setBanner({ tone: "error", message: `实时转写失败：${message}` });
+          } finally {
+            setIsStreamingPending(false);
+          }
+        })
+        .catch((error) => {
+          console.error("stream queue error", error);
+        });
+    },
+    [mockFallbackEnabled, selectedMeetingId],
+  );
+
   const uploadMutation = useMutation({
     mutationFn: async (blob: Blob) => {
       if (!selectedMeetingId) {
@@ -89,7 +172,7 @@ export default function App() {
     },
     onSuccess: async (newSegments) => {
       if (newSegments.length > 0) {
-        setSegments((current) => [...current, ...newSegments]);
+        setSegments(newSegments.sort((a, b) => a.start - b.start));
       }
       setBanner({ tone: "success", message: "转写任务已完成，字幕即将同步。" });
       if (selectedMeetingId) {
@@ -107,6 +190,51 @@ export default function App() {
     },
   });
 
+  const deleteMutation = useMutation({
+    mutationFn: async (meetingId: string) => deleteMeeting(meetingId),
+    onMutate: () => {
+      setBanner({ tone: "info", message: "正在删除会议..." });
+    },
+    onSuccess: (_, meetingId) => {
+      const updatedMeetings =
+        queryClient.setQueryData<Meeting[]>(["meetings"], (prev = []) =>
+          prev.filter((meeting) => meeting.id !== meetingId),
+        ) ?? [];
+
+      queryClient.removeQueries({ queryKey: ["summary", meetingId] });
+      queryClient.removeQueries({ queryKey: ["transcript", meetingId] });
+      queryClient.invalidateQueries({ queryKey: ["meetings"] });
+
+      if (selectedMeetingId === meetingId) {
+        const nextMeetingId = updatedMeetings[0]?.id ?? null;
+        setSelectedMeetingId(nextMeetingId);
+        setSegments([]);
+        setHighlights([]);
+        streamQueueRef.current = Promise.resolve();
+        streamSeqRef.current = 0;
+        streamOffsetRef.current = 0;
+      }
+
+      setBanner({ tone: "success", message: "会议已删除。" });
+    },
+    onError: (error: Error) => {
+      setBanner({ tone: "error", message: `删除会议失败：${error.message}` });
+    },
+    onSettled: () => {
+      window.setTimeout(() => setBanner(null), 4000);
+    },
+  });
+
+  const handleDeleteMeeting = useCallback(
+    (meetingId: string) => {
+      if (!meetingId || deleteMutation.isPending) {
+        return;
+      }
+      deleteMutation.mutate(meetingId);
+    },
+    [deleteMutation.isPending, deleteMutation.mutate],
+  );
+
   const handleUpload = useCallback(
     async (blob: Blob | null) => {
       if (!blob) {
@@ -120,19 +248,27 @@ export default function App() {
       setLatestBlob(blob);
       uploadMutation.mutate(blob);
     },
-    [selectedMeetingId, uploadMutation],
+    [selectedMeetingId, uploadMutation.mutate],
   );
 
   const recorder = useMediaRecorder({
     onData: (blob) => {
-      setLatestBlob(blob);
       handleUpload(blob);
     },
+    onChunk: handleStreamChunk,
+    chunkDurationMs: 4000,
   });
 
   useEffect(() => {
     if (!recorder.isRecording && !uploadMutation.isPending) {
-      setSegments(persistedSegments);
+      setSegments((current) => {
+        if (segmentsAreEqual(current, persistedSegments)) {
+          return current;
+        }
+        return persistedSegments;
+      });
+      const latestEnd = persistedSegments.reduce((max, segment) => Math.max(max, segment.end), 0);
+      streamOffsetRef.current = latestEnd;
     }
   }, [persistedSegments, recorder.isRecording, uploadMutation.isPending]);
 
@@ -140,11 +276,23 @@ export default function App() {
     setHighlights([]);
   }, [selectedMeetingId]);
 
+  useEffect(() => {
+    streamQueueRef.current = Promise.resolve();
+    streamSeqRef.current = 0;
+    streamOffsetRef.current = 0;
+  }, [selectedMeetingId]);
+
+  const handleSimulationSegment = useCallback((segment: TranscriptSegment) => {
+    setSegments((current) => [...current.slice(-30), segment]);
+  }, []);
+
   useTranscriptSimulation({
-    isActive: recorder.isRecording && !uploadMutation.isPending && persistedSegments.length === 0,
-    onSegment: (segment) => {
-      setSegments((current) => [...current.slice(-30), segment]);
-    },
+    isActive:
+      mockFallbackEnabled &&
+      recorder.isRecording &&
+      !uploadMutation.isPending &&
+      persistedSegments.length === 0,
+    onSegment: handleSimulationSegment,
   });
 
   const handleHighlight = useCallback((segment: TranscriptSegment) => {
@@ -163,18 +311,22 @@ export default function App() {
     setHighlights((current) => current.filter((item) => item.id !== id));
   }, []);
 
-  const handleCreateMeeting = useCallback(() => {
-    const newMeeting: Meeting = {
-      id: `local-${Date.now()}`,
-      title: `临时会议 ${meetings.length + 1}`,
-      duration: 0,
-      language: "zh",
-    };
-    queryClient.setQueryData<Meeting[]>(["meetings"], (prev = []) => [newMeeting, ...prev]);
-    setSelectedMeetingId(newMeeting.id);
-    setSegments([]);
-    setHighlights([]);
-    setBanner({ tone: "info", message: "已创建临时会议，可直接开始录音。" });
+  const handleCreateMeeting = useCallback(async () => {
+    const title = `临时会议 ${meetings.length + 1}`;
+    try {
+      const meeting = await createMeeting({ title, language: "zh" });
+      queryClient.setQueryData<Meeting[]>(["meetings"], (prev = []) => {
+        const existing = prev.filter((item) => item.id !== meeting.id);
+        return [meeting, ...existing];
+      });
+      setSelectedMeetingId(meeting.id);
+      setSegments([]);
+      setHighlights([]);
+      setBanner({ tone: "success", message: "已创建会议，可开始录音或上传音频。" });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "创建会议失败";
+      setBanner({ tone: "error", message });
+    }
   }, [meetings.length, queryClient]);
 
   const downloadMarkdown = useCallback(() => {
@@ -220,7 +372,14 @@ export default function App() {
             ) : (
               <p className="text-xs uppercase tracking-wide text-slate-400">Tailwind + React + Whisper 后端</p>
             )}
-            <MeetingSelector meetings={meetings} value={selectedMeetingId} onChange={setSelectedMeetingId} onCreateNew={handleCreateMeeting} />
+            <MeetingSelector
+              meetings={meetings}
+              value={selectedMeetingId}
+              onChange={setSelectedMeetingId}
+              onCreateNew={handleCreateMeeting}
+              onDelete={handleDeleteMeeting}
+              deletingMeetingId={deleteMutation.isPending ? deleteMutation.variables ?? null : null}
+            />
           </div>
         </header>
 
@@ -233,14 +392,14 @@ export default function App() {
             onStop={recorder.stopRecording}
             onImport={(file) => handleUpload(file)}
             onUploadLatest={() => handleUpload(latestBlob)}
-            busy={uploadMutation.isPending || fetchingTranscript}
+            busy={uploadMutation.isPending || fetchingTranscript || isStreamingPending}
             error={recorder.error ?? undefined}
           />
           <TranscriptStream
             segments={segments}
             onHighlight={handleHighlight}
-            isStreaming={recorder.isRecording}
-            isLoading={fetchingTranscript}
+            isStreaming={recorder.isRecording || isStreamingPending}
+            isLoading={fetchingTranscript && !recorder.isRecording}
           />
           <HighlightsPanel highlights={highlights} segments={segmentsMap} onRemove={handleRemoveHighlight} />
           <SummaryPanel summary={summary} isLoading={fetchingSummary} onRefresh={() => refetchSummary()} />

@@ -4,14 +4,22 @@ type RecorderState = "idle" | "recording" | "stopping" | "unsupported" | "denied
 
 interface UseMediaRecorderOptions {
   onData: (blob: Blob) => void;
+  onChunk?: (blob: Blob, durationSec: number) => void;
   mimeType?: string;
+  chunkDurationMs?: number;
 }
 
-export function useMediaRecorder({ onData, mimeType = "audio/webm" }: UseMediaRecorderOptions) {
+export function useMediaRecorder({
+  onData,
+  onChunk,
+  mimeType = "audio/webm",
+  chunkDurationMs = 5000,
+}: UseMediaRecorderOptions) {
   const [state, setState] = useState<RecorderState>("idle");
   const [error, setError] = useState<string | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const stoppingRef = useRef(false);
 
   useEffect(() => {
     if (!navigator.mediaDevices || !window.MediaRecorder) {
@@ -45,21 +53,26 @@ export function useMediaRecorder({ onData, mimeType = "audio/webm" }: UseMediaRe
       chunksRef.current = [];
 
       recorder.addEventListener("dataavailable", (event) => {
-        if (event.data && event.data.size > 0) {
-          chunksRef.current.push(event.data);
+        if (!event.data || event.data.size === 0) {
+          return;
+        }
+        chunksRef.current.push(event.data);
+        if (!stoppingRef.current && onChunk) {
+          onChunk(event.data, chunkDurationMs / 1000);
         }
       });
 
       recorder.addEventListener("stop", () => {
         const blob = new Blob(chunksRef.current, { type: mimeType });
         chunksRef.current = [];
+        stoppingRef.current = false;
         onData(blob);
         recorder.stream.getTracks().forEach((track) => track.stop());
         setState("idle");
       });
 
       mediaRecorderRef.current = recorder;
-      recorder.start();
+      recorder.start(chunkDurationMs);
       setState("recording");
       setError(null);
     } catch (err) {
@@ -73,6 +86,7 @@ export function useMediaRecorder({ onData, mimeType = "audio/webm" }: UseMediaRe
 
   const stopRecording = useCallback(() => {
     setState((current) => (current === "recording" ? "stopping" : current));
+    stoppingRef.current = true;
     stopActiveRecorder();
   }, [stopActiveRecorder]);
 
