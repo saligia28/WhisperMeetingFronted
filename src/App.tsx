@@ -10,6 +10,7 @@ import { HighlightsPanel } from "./components/HighlightsPanel";
 import { SummaryPanel } from "./components/SummaryPanel";
 import { ExportPanel } from "./components/ExportPanel";
 import { useMediaRecorder } from "./hooks/useMediaRecorder";
+import { useRealtimeTranscription } from "./hooks/useRealtimeTranscription";
 import { useTranscriptSimulation } from "./hooks/useTranscriptSimulation";
 import {
   createMeeting,
@@ -54,6 +55,10 @@ export default function App() {
   const [latestBlob, setLatestBlob] = useState<Blob | null>(null);
   const [banner, setBanner] = useState<{ message: string; tone: "info" | "success" | "error" } | null>(null);
   const mockFallbackEnabled = (import.meta.env.VITE_ENABLE_MOCK_FALLBACK ?? "false") === "true";
+
+  // 启用 WebSocket 实时转写（新方案）
+  const useWebSocketTranscription = true;
+
   const streamOffsetRef = useRef(0);
   const streamQueueRef = useRef<Promise<void>>(Promise.resolve());
   const streamSeqRef = useRef(0);
@@ -64,11 +69,12 @@ export default function App() {
     queryFn: fetchMeetings,
   });
 
-  useEffect(() => {
-    if (!loadingMeetings && meetings.length > 0 && !selectedMeetingId) {
-      setSelectedMeetingId(meetings[0]?.id ?? null);
-    }
-  }, [loadingMeetings, meetings, selectedMeetingId]);
+  // 注释掉自动选择会议的逻辑，要求用户手动选择
+  // useEffect(() => {
+  //   if (!loadingMeetings && meetings.length > 0 && !selectedMeetingId) {
+  //     setSelectedMeetingId(meetings[0]?.id ?? null);
+  //   }
+  // }, [loadingMeetings, meetings, selectedMeetingId]);
 
   const selectedMeeting: Meeting | undefined = useMemo(
     () => meetings.find((meeting) => meeting.id === selectedMeetingId),
@@ -251,16 +257,43 @@ export default function App() {
     [selectedMeetingId, uploadMutation.mutate],
   );
 
+  // WebSocket 实时转写回调
+  const handleRealtimeSegments = useCallback((newSegments: TranscriptSegment[]) => {
+    if (newSegments.length > 0) {
+      console.log("[App] Received realtime segments:", newSegments.length);
+      setSegments((current) => {
+        const merged = [...current, ...newSegments];
+        return merged.sort((a, b) => a.start - b.start);
+      });
+    }
+  }, []);
+
+  const handleRealtimeError = useCallback((error: string) => {
+    setBanner({ tone: "error", message: `实时转写错误：${error}` });
+  }, []);
+
+  // WebSocket 实时转写 Hook
+  const realtimeTranscription = useRealtimeTranscription({
+    meetingId: useWebSocketTranscription ? selectedMeetingId : null,
+    onSegments: handleRealtimeSegments,
+    onError: handleRealtimeError,
+  });
+  const previousRealtimeStateRef = useRef(realtimeTranscription.state);
+
+  // 传统 MediaRecorder Hook（作为备选）
   const recorder = useMediaRecorder({
     onData: (blob) => {
       handleUpload(blob);
     },
-    onChunk: handleStreamChunk,
+    // 暂时禁用实时流式转写，因为 MediaRecorder 分块生成的文件缺少完整头部
+    // onChunk: handleStreamChunk,
+    onChunk: undefined,
     chunkDurationMs: 4000,
   });
 
   useEffect(() => {
-    if (!recorder.isRecording && !uploadMutation.isPending) {
+    // 仅在非 WebSocket 模式或非录音状态时同步持久化的 segments
+    if (!useWebSocketTranscription && !recorder.isRecording && !uploadMutation.isPending) {
       setSegments((current) => {
         if (segmentsAreEqual(current, persistedSegments)) {
           return current;
@@ -270,7 +303,7 @@ export default function App() {
       const latestEnd = persistedSegments.reduce((max, segment) => Math.max(max, segment.end), 0);
       streamOffsetRef.current = latestEnd;
     }
-  }, [persistedSegments, recorder.isRecording, uploadMutation.isPending]);
+  }, [useWebSocketTranscription, persistedSegments, recorder.isRecording, uploadMutation.isPending]);
 
   useEffect(() => {
     setHighlights([]);
@@ -281,6 +314,23 @@ export default function App() {
     streamSeqRef.current = 0;
     streamOffsetRef.current = 0;
   }, [selectedMeetingId]);
+
+  useEffect(() => {
+    if (!useWebSocketTranscription) {
+      previousRealtimeStateRef.current = realtimeTranscription.state;
+      return;
+    }
+
+    const previous = previousRealtimeStateRef.current;
+    const current = realtimeTranscription.state;
+
+    if (previous === "recording" && current === "idle" && selectedMeetingId) {
+      void refetchTranscript();
+      void refetchSummary();
+    }
+
+    previousRealtimeStateRef.current = current;
+  }, [useWebSocketTranscription, realtimeTranscription.state, selectedMeetingId, refetchTranscript, refetchSummary]);
 
   const handleSimulationSegment = useCallback((segment: TranscriptSegment) => {
     setSegments((current) => [...current.slice(-30), segment]);
@@ -343,35 +393,19 @@ export default function App() {
     URL.revokeObjectURL(url);
   }, [selectedMeeting?.title, summary]);
 
+  const recorderControlsDisabled = meetings.length === 0 || !selectedMeeting;
+
   return (
     <div className={`relative min-h-screen bg-surface-50 ${gradient}`}>
       <div className="absolute inset-x-0 top-0 -z-10 h-[420px] bg-gradient-to-br from-primary-400/30 via-primary-200/20 to-transparent blur-3xl" />
-      <div className="mx-auto flex w-full max-w-6xl flex-col gap-10 px-6 pb-16 pt-10 md:px-10">
-        <header className="flex flex-col gap-6 rounded-3xl border border-white/60 bg-white/80 px-6 py-6 shadow-[0_20px_60px_-40px_rgba(15,23,42,0.45)] backdrop-blur md:flex-row md:items-center md:justify-between">
-          <div className="flex items-center gap-4">
-            <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-primary-500 text-white shadow-lg shadow-primary-500/40">
-              <Bars3Icon className="h-6 w-6" />
-            </div>
+      <div className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-6 pb-16 pt-10 md:px-10 lg:flex-row lg:gap-8">
+        <aside className="lg:w-72">
+          <div className="flex flex-col gap-5 rounded-3xl border border-white/60 bg-white/80 p-5 shadow-[0_20px_60px_-40px_rgba(15,23,42,0.45)] backdrop-blur lg:sticky lg:top-10 lg:max-h-[calc(100vh-160px)] lg:overflow-hidden">
             <div>
-              <h1 className="text-xl font-bold text-slate-900">WhisperMeeting 控制台</h1>
-              <p className="text-sm text-slate-500">全流程会议记录与摘要助手</p>
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">会话管理</p>
+              <h2 className="mt-1 text-base font-semibold text-slate-900">会议列表</h2>
+              <p className="mt-1 text-xs text-slate-500">切换历史记录或创建新的会议房间。</p>
             </div>
-          </div>
-          <div className="flex flex-col gap-2 md:items-end">
-            {banner ? (
-              <div
-                className={clsx(
-                  "rounded-full px-4 py-2 text-sm font-medium shadow-sm transition",
-                  banner.tone === "success" && "bg-emerald-100 text-emerald-700",
-                  banner.tone === "error" && "bg-rose-100 text-rose-600",
-                  banner.tone === "info" && "bg-primary-50 text-primary-600",
-                )}
-              >
-                {banner.message}
-              </div>
-            ) : (
-              <p className="text-xs uppercase tracking-wide text-slate-400">Tailwind + React + Whisper 后端</p>
-            )}
             <MeetingSelector
               meetings={meetings}
               value={selectedMeetingId}
@@ -379,32 +413,64 @@ export default function App() {
               onCreateNew={handleCreateMeeting}
               onDelete={handleDeleteMeeting}
               deletingMeetingId={deleteMutation.isPending ? deleteMutation.variables ?? null : null}
+              className="flex-1"
             />
           </div>
-        </header>
+        </aside>
+        <div className="flex flex-1 flex-col gap-6">
+          <header className="rounded-3xl border border-white/60 bg-white/80 px-6 py-6 shadow-[0_20px_60px_-40px_rgba(15,23,42,0.45)] backdrop-blur">
+            <div className="flex items-center gap-4">
+              <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-primary-500 text-white shadow-lg shadow-primary-500/40">
+                <Bars3Icon className="h-6 w-6" />
+              </div>
+              <div>
+                <h1 className="text-xl font-bold text-slate-900">WhisperMeeting 控制台</h1>
+                <p className="text-sm text-slate-500">全流程会议记录与摘要助手</p>
+              </div>
+            </div>
+            <div className="mt-4">
+              {banner ? (
+                <div
+                  className={clsx(
+                    "rounded-full px-4 py-2 text-sm font-medium shadow-sm transition",
+                    banner.tone === "success" && "bg-emerald-100 text-emerald-700",
+                    banner.tone === "error" && "bg-rose-100 text-rose-600",
+                    banner.tone === "info" && "bg-primary-50 text-primary-600",
+                  )}
+                >
+                  {banner.message}
+                </div>
+              ) : (
+                <p className="text-xs uppercase tracking-wide text-slate-400">Tailwind + React + Whisper 后端</p>
+              )}
+            </div>
+          </header>
 
-        <main className="grid gap-6 lg:grid-cols-3">
-          <RecorderPanel
-            meeting={selectedMeeting}
-            recorderState={recorder.state}
-            isRecording={recorder.isRecording}
-            onStart={recorder.startRecording}
-            onStop={recorder.stopRecording}
-            onImport={(file) => handleUpload(file)}
-            onUploadLatest={() => handleUpload(latestBlob)}
-            busy={uploadMutation.isPending || fetchingTranscript || isStreamingPending}
-            error={recorder.error ?? undefined}
-          />
-          <TranscriptStream
-            segments={segments}
-            onHighlight={handleHighlight}
-            isStreaming={recorder.isRecording || isStreamingPending}
-            isLoading={fetchingTranscript && !recorder.isRecording}
-          />
-          <HighlightsPanel highlights={highlights} segments={segmentsMap} onRemove={handleRemoveHighlight} />
-          <SummaryPanel summary={summary} isLoading={fetchingSummary} onRefresh={() => refetchSummary()} />
-          <ExportPanel onDownloadMarkdown={downloadMarkdown} />
-        </main>
+          <main className="flex w-full flex-col gap-6">
+            <RecorderPanel
+              meeting={selectedMeeting}
+              controlsDisabled={recorderControlsDisabled}
+              recorderState={useWebSocketTranscription ? realtimeTranscription.state : recorder.state}
+              isRecording={useWebSocketTranscription ? realtimeTranscription.isRecording : recorder.isRecording}
+              onStart={useWebSocketTranscription ? realtimeTranscription.startRecording : recorder.startRecording}
+              onStop={useWebSocketTranscription ? realtimeTranscription.stopRecording : recorder.stopRecording}
+              onImport={(file) => handleUpload(file)}
+              onUploadLatest={() => handleUpload(latestBlob)}
+              busy={uploadMutation.isPending || fetchingTranscript || isStreamingPending}
+              error={useWebSocketTranscription ? realtimeTranscription.error ?? undefined : recorder.error ?? undefined}
+              mode={useWebSocketTranscription ? "websocket" : "upload"}
+            />
+            <TranscriptStream
+              segments={segments}
+              onHighlight={handleHighlight}
+              isStreaming={useWebSocketTranscription ? realtimeTranscription.isRecording : recorder.isRecording || isStreamingPending}
+              isLoading={fetchingTranscript && !(useWebSocketTranscription ? realtimeTranscription.isRecording : recorder.isRecording)}
+            />
+            <HighlightsPanel highlights={highlights} segments={segmentsMap} onRemove={handleRemoveHighlight} />
+            <SummaryPanel summary={summary} isLoading={fetchingSummary} onRefresh={() => refetchSummary()} />
+            <ExportPanel onDownloadMarkdown={downloadMarkdown} />
+          </main>
+        </div>
       </div>
     </div>
   );

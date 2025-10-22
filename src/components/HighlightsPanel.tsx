@@ -15,7 +15,7 @@ export function HighlightsPanel({ highlights, segments, onRemove }: HighlightsPa
     <Panel
       title="重点标记"
       description="收集会议中的关键句，方便整理与二次编辑"
-      className="lg:col-span-1"
+      className="w-full"
       action={
         <span className="inline-flex items-center gap-1 rounded-full bg-slate-900/5 px-3 py-1 text-xs font-medium text-slate-500">
           <BookmarkIcon className="h-3.5 w-3.5" />

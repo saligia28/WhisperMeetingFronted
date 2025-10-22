@@ -14,7 +14,7 @@ export function SummaryPanel({ summary, isLoading = false, onRefresh }: SummaryP
     <Panel
       title="摘要与行动项"
       description="快速回顾会议重点，支持导出 Markdown"
-      className="lg:col-span-2"
+      className="w-full"
       action={
         <button
           type="button"

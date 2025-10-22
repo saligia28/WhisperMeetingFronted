@@ -22,7 +22,7 @@ export function TranscriptStream({ segments, onHighlight, isStreaming, isLoading
           {isStreaming ? "Streaming" : "Standby"}
         </span>
       }
-      className="lg:col-span-2"
+      className="w-full"
     >
       <div className="relative max-h-[320px] overflow-hidden rounded-2xl bg-gradient-to-b from-white via-white to-surface-100">
         <div className="custom-scroll h-[320px] overflow-y-auto px-4 py-2 pr-2">
