@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>录音功能诊断工具</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            max-width: 800px;
+            margin: 40px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .card {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        h1 { color: #333; margin-top: 0; }
+        h2 { color: #666; font-size: 18px; margin-top: 0; }
+        .status {
+            padding: 8px 12px;
+            border-radius: 4px;
+            display: inline-block;
+            margin: 4px 0;
+            font-weight: 500;
+        }
+        .success { background: #d4edda; color: #155724; }
+        .error { background: #f8d7da; color: #721c24; }
+        .warning { background: #fff3cd; color: #856404; }
+        .info { background: #d1ecf1; color: #0c5460; }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            margin: 5px;
+        }
+        button:hover { background: #0056b3; }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        pre {
+            background: #f8f9fa;
+            padding: 12px;
+            border-radius: 4px;
+            overflow-x: auto;
+            font-size: 12px;
+        }
+        .step {
+            margin: 15px 0;
+            padding: 15px;
+            border-left: 4px solid #007bff;
+            background: #f8f9fa;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>🔍 录音功能诊断工具</h1>
+        <p>这个工具会检查录音功能的各项配置和连接状态</p>
+    </div>
+
+    <div class="card">
+        <h2>1. 环境变量检查</h2>
+        <div id="env-check"></div>
+    </div>
+
+    <div class="card">
+        <h2>2. 后端连接测试</h2>
+        <button onclick="testBackendConnection()">测试HTTP连接</button>
+        <div id="backend-test"></div>
+    </div>
+
+    <div class="card">
+        <h2>3. WebSocket连接测试</h2>
+        <button onclick="testWebSocketConnection()">测试WebSocket连接</button>
+        <div id="ws-test"></div>
+    </div>
+
+    <div class="card">
+        <h2>4. 麦克风权限测试</h2>
+        <button onclick="testMicrophone()">测试麦克风</button>
+        <div id="mic-test"></div>
+    </div>
+
+    <div class="card">
+        <h2>5. 完整录音流程测试</h2>
+        <button id="record-btn" onclick="testRecording()">开始测试录音</button>
+        <div id="record-test"></div>
+    </div>
+
+    <script>
+        // 1. 检查环境变量
+        function checkEnvironment() {
+            const envCheck = document.getElementById('env-check');
+            const apiBaseUrl = import.meta.env.VITE_API_BASE_URL;
+            const wsBaseUrl = apiBaseUrl?.replace('http://', 'ws://').replace('https://', 'wss://') || 'ws://localhost:8002';
+
+            envCheck.innerHTML = `
+                <div class="status info">API Base URL: ${apiBaseUrl || '未设置 (将使用默认值)'}</div>
+                <div class="status info">WebSocket URL: ${wsBaseUrl}</div>
+                ${!apiBaseUrl ? '<div class="status warning">⚠️ 环境变量未加载,请确保 .env.local 文件存在且服务器已重启</div>' : ''}
+            `;
+        }
+
+        // 2. 测试后端HTTP连接
+        async function testBackendConnection() {
+            const testDiv = document.getElementById('backend-test');
+            testDiv.innerHTML = '<div class="status info">正在测试...</div>';
+
+            const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8001';
+
+            try {
+                const response = await fetch(`${apiBaseUrl}/health`);
+                const data = await response.json();
+
+                if (response.ok && data.status === 'ok') {
+                    testDiv.innerHTML = '<div class="status success">✅ 后端连接成功</div>';
+                } else {
+                    testDiv.innerHTML = '<div class="status error">❌ 后端响应异常</div>';
+                }
+            } catch (error) {
+                testDiv.innerHTML = `
+                    <div class="status error">❌ 后端连接失败</div>
+                    <pre>${error.message}</pre>
+                    <div class="step">
+                        <strong>解决方法:</strong><br>
+                        1. 确认后端服务正在运行: <code>python -m whispermeeting.api.server</code><br>
+                        2. 检查端口是否正确: <code>lsof -i :8001</code><br>
+                        3. 检查 .env.local 中的 VITE_API_BASE_URL 配置
+                    </div>
+                `;
+            }
+        }
+
+        // 3. 测试WebSocket连接
+        async function testWebSocketConnection() {
+            const testDiv = document.getElementById('ws-test');
+            testDiv.innerHTML = '<div class="status info">正在测试...</div>';
+
+            const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8001';
+            const wsBaseUrl = apiBaseUrl.replace('http://', 'ws://').replace('https://', 'wss://');
+
+            // 先创建一个测试会议
+            try {
+                const meetingResponse = await fetch(`${apiBaseUrl}/meetings`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ title: '诊断测试会议' })
+                });
+
+                if (!meetingResponse.ok) {
+                    testDiv.innerHTML = '<div class="status error">❌ 无法创建测试会议</div>';
+                    return;
+                }
+
+                const meeting = await meetingResponse.json();
+                const wsUrl = `${wsBaseUrl}/meetings/${meeting.id}/transcribe/realtime?sample_rate=16000`;
+
+                testDiv.innerHTML = `
+                    <div class="status info">测试会议ID: ${meeting.id}</div>
+                    <div class="status info">WebSocket URL: ${wsUrl}</div>
+                    <div class="status info">正在连接...</div>
+                `;
+
+                const ws = new WebSocket(wsUrl);
+
+                ws.onopen = () => {
+                    testDiv.innerHTML = '<div class="status success">✅ WebSocket连接成功!</div>';
+                    setTimeout(() => ws.close(), 1000);
+                };
+
+                ws.onerror = (error) => {
+                    testDiv.innerHTML = `
+                        <div class="status error">❌ WebSocket连接失败</div>
+                        <div class="step">
+                            <strong>可能的原因:</strong><br>
+                            1. 后端服务未运行<br>
+                            2. WebSocket路由未正确配置<br>
+                            3. 端口配置错误<br>
+                            <strong>当前连接URL:</strong> <code>${wsUrl}</code>
+                        </div>
+                    `;
+                };
+
+                ws.onmessage = (event) => {
+                    const data = JSON.parse(event.data);
+                    if (data.type === 'session_started') {
+                        testDiv.innerHTML = `
+                            <div class="status success">✅ WebSocket连接成功!</div>
+                            <div class="status success">✅ 会话已建立</div>
+                            <pre>${JSON.stringify(data, null, 2)}</pre>
+                        `;
+                    }
+                };
+
+            } catch (error) {
+                testDiv.innerHTML = `
+                    <div class="status error">❌ 测试失败</div>
+                    <pre>${error.message}</pre>
+                `;
+            }
+        }
+
+        // 4. 测试麦克风
+        async function testMicrophone() {
+            const testDiv = document.getElementById('mic-test');
+            testDiv.innerHTML = '<div class="status info">正在请求麦克风权限...</div>';
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        sampleRate: { ideal: 16000 },
+                        channelCount: 1
+                    }
+                });
+
+                testDiv.innerHTML = `
+                    <div class="status success">✅ 麦克风权限已授予</div>
+                    <div class="status info">音频轨道: ${stream.getAudioTracks().length} 个</div>
+                `;
+
+                // 停止音频流
+                stream.getTracks().forEach(track => track.stop());
+            } catch (error) {
+                testDiv.innerHTML = `
+                    <div class="status error">❌ 麦克风访问失败</div>
+                    <pre>${error.message}</pre>
+                    <div class="step">
+                        <strong>解决方法:</strong><br>
+                        1. 点击浏览器地址栏左侧的锁图标<br>
+                        2. 允许"麦克风"权限<br>
+                        3. 刷新页面后重试
+                    </div>
+                `;
+            }
+        }
+
+        // 5. 完整录音测试
+        let testWs = null;
+        let testStream = null;
+        let testAudioContext = null;
+        let isTestRecording = false;
+
+        async function testRecording() {
+            const btn = document.getElementById('record-btn');
+            const testDiv = document.getElementById('record-test');
+
+            if (isTestRecording) {
+                // 停止录音
+                if (testWs) testWs.close();
+                if (testStream) testStream.getTracks().forEach(t => t.stop());
+                if (testAudioContext) testAudioContext.close();
+
+                btn.textContent = '开始测试录音';
+                isTestRecording = false;
+                return;
+            }
+
+            testDiv.innerHTML = '<div class="status info">正在初始化...</div>';
+
+            try {
+                // 1. 创建会议
+                const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8001';
+                const meetingResponse = await fetch(`${apiBaseUrl}/meetings`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ title: '录音测试' })
+                });
+                const meeting = await meetingResponse.json();
+
+                // 2. 获取麦克风
+                testStream = await navigator.mediaDevices.getUserMedia({
+                    audio: { sampleRate: { ideal: 16000 }, channelCount: 1 }
+                });
+
+                // 3. 创建AudioContext
+                testAudioContext = new AudioContext({ sampleRate: 16000 });
+                await testAudioContext.resume();
+
+                // 4. 连接WebSocket
+                const wsBaseUrl = apiBaseUrl.replace('http://', 'ws://').replace('https://', 'wss://');
+                const wsUrl = `${wsBaseUrl}/meetings/${meeting.id}/transcribe/realtime?sample_rate=16000`;
+                testWs = new WebSocket(wsUrl);
+
+                testWs.onopen = () => {
+                    testDiv.innerHTML += '<div class="status success">✅ WebSocket已连接</div>';
+                };
+
+                testWs.onmessage = (event) => {
+                    const data = JSON.parse(event.data);
+                    if (data.type === 'session_started') {
+                        testDiv.innerHTML += '<div class="status success">✅ 录音会话已建立</div>';
+                        btn.textContent = '停止录音';
+                        isTestRecording = true;
+                    } else if (data.type === 'transcription') {
+                        testDiv.innerHTML += `
+                            <div class="status success">✅ 收到转录结果</div>
+                            <pre>${JSON.stringify(data.segments, null, 2)}</pre>
+                        `;
+                    } else if (data.type === 'error') {
+                        testDiv.innerHTML += `<div class="status error">❌ 错误: ${data.message}</div>`;
+                    }
+                };
+
+                testWs.onerror = (error) => {
+                    testDiv.innerHTML += '<div class="status error">❌ WebSocket连接错误</div>';
+                };
+
+            } catch (error) {
+                testDiv.innerHTML += `
+                    <div class="status error">❌ 测试失败</div>
+                    <pre>${error.message}</pre>
+                `;
+            }
+        }
+
+        // 页面加载时自动检查环境
+        window.onload = () => {
+            checkEnvironment();
+        };
+    </script>
+</body>
+</html>

@@ -18,10 +18,13 @@ import {
   fetchMeetings,
   fetchSummary,
   fetchTranscriptSegments,
+  getUserSettings,
   streamTranscription,
+  updateUserSettings,
   uploadTranscription,
 } from "./services/api";
 import type { Highlight, Meeting, MeetingSummary, TranscriptSegment } from "./types";
+import type { VadConfig } from "./types/vad";
 
 const gradient =
   "bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.15),_transparent_55%),radial-gradient(circle_at_bottom,_rgba(165,180,252,0.2),_transparent_60%)]";
@@ -59,6 +62,8 @@ export default function App() {
   // 启用 WebSocket 实时转写（新方案）
   const useWebSocketTranscription = true;
 
+  // console.log('[App.tsx] useWebSocketTranscription:', useWebSocketTranscription);
+
   const streamOffsetRef = useRef(0);
   const streamQueueRef = useRef<Promise<void>>(Promise.resolve());
   const streamSeqRef = useRef(0);
@@ -67,6 +72,21 @@ export default function App() {
   const { data: meetings = [], isLoading: loadingMeetings } = useQuery({
     queryKey: ["meetings"],
     queryFn: fetchMeetings,
+  });
+
+  // Load user VAD settings from backend
+  const { data: userVadSettings } = useQuery<VadConfig>({
+    queryKey: ["userSettings"],
+    queryFn: getUserSettings,
+    staleTime: 5 * 60 * 1000, // Cache for 5 minutes
+  });
+
+  // Update user VAD settings mutation
+  const updateSettingsMutation = useMutation({
+    mutationFn: updateUserSettings,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["userSettings"] });
+    },
   });
 
   // 注释掉自动选择会议的逻辑，要求用户手动选择
@@ -459,6 +479,9 @@ export default function App() {
               busy={uploadMutation.isPending || fetchingTranscript || isStreamingPending}
               error={useWebSocketTranscription ? realtimeTranscription.error ?? undefined : recorder.error ?? undefined}
               mode={useWebSocketTranscription ? "websocket" : "upload"}
+              initialVadSettings={userVadSettings}
+              onVadSettingsChange={(settings) => updateSettingsMutation.mutate(settings)}
+              audioLevel={useWebSocketTranscription ? realtimeTranscription.audioLevel : recorder.audioLevel}
             />
             <TranscriptStream
               segments={segments}

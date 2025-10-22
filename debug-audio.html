@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebSocket音频调试工具</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            max-width: 1000px;
+            margin: 20px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .card {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        h1, h2 { margin-top: 0; }
+        .status {
+            padding: 8px 12px;
+            border-radius: 4px;
+            display: inline-block;
+            margin: 4px 0;
+            font-weight: 500;
+        }
+        .success { background: #d4edda; color: #155724; }
+        .error { background: #f8d7da; color: #721c24; }
+        .warning { background: #fff3cd; color: #856404; }
+        .info { background: #d1ecf1; color: #0c5460; }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            margin: 5px;
+        }
+        button:hover { background: #0056b3; }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        button.recording {
+            background: #dc3545;
+        }
+        pre {
+            background: #f8f9fa;
+            padding: 12px;
+            border-radius: 4px;
+            overflow-x: auto;
+            font-size: 12px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+        .metric {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 4px;
+            border-left: 4px solid #007bff;
+        }
+        .metric-label {
+            font-size: 12px;
+            color: #666;
+            margin-bottom: 5px;
+        }
+        .metric-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #333;
+        }
+        #log-container {
+            max-height: 400px;
+            overflow-y: auto;
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 15px;
+            border-radius: 4px;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 12px;
+        }
+        .log-entry {
+            margin: 3px 0;
+            padding: 2px 0;
+            border-bottom: 1px solid #333;
+        }
+        .log-info { color: #4fc3f7; }
+        .log-success { color: #81c784; }
+        .log-error { color: #e57373; }
+        .log-warning { color: #ffb74d; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>🎙️ WebSocket实时音频调试工具</h1>
+        <p>这个工具会详细显示音频捕获和传输的每一步</p>
+    </div>
+
+    <div class="card">
+        <h2>控制面板</h2>
+        <button id="start-btn" onclick="startDebugRecording()">开始调试录音</button>
+        <button onclick="clearLogs()">清空日志</button>
+        <div style="margin-top: 15px;">
+            <label>
+                后端地址:
+                <input type="text" id="backend-url" value="http://localhost:8001" style="padding: 5px; width: 300px;">
+            </label>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>实时指标</h2>
+        <div class="metrics">
+            <div class="metric">
+                <div class="metric-label">WebSocket状态</div>
+                <div class="metric-value" id="ws-status">未连接</div>
+            </div>
+            <div class="metric">
+                <div class="metric-label">已发送帧数</div>
+                <div class="metric-value" id="frames-sent">0</div>
+            </div>
+            <div class="metric">
+                <div class="metric-label">已发送数据量</div>
+                <div class="metric-value" id="data-sent">0 KB</div>
+            </div>
+            <div class="metric">
+                <div class="metric-label">收到的转录片段</div>
+                <div class="metric-value" id="segments-received">0</div>
+            </div>
+            <div class="metric">
+                <div class="metric-label">音频时长</div>
+                <div class="metric-value" id="audio-duration">0.0s</div>
+            </div>
+            <div class="metric">
+                <div class="metric-label">采样率</div>
+                <div class="metric-value" id="sample-rate">-</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>详细日志</h2>
+        <div id="log-container"></div>
+    </div>
+
+    <div class="card">
+        <h2>收到的转录结果</h2>
+        <div id="transcription-results">
+            <div class="status info">等待转录结果...</div>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let audioContext = null;
+        let processorNode = null;
+        let mediaStream = null;
+        let isRecording = false;
+
+        let framesSent = 0;
+        let dataSent = 0;
+        let segmentsReceived = 0;
+        let audioDuration = 0;
+        let startTime = 0;
+
+        function log(message, type = 'info') {
+            const logContainer = document.getElementById('log-container');
+            const timestamp = new Date().toLocaleTimeString('zh-CN', { hour12: false, fractionalSecondDigits: 3 });
+            const entry = document.createElement('div');
+            entry.className = `log-entry log-${type}`;
+            entry.textContent = `[${timestamp}] ${message}`;
+            logContainer.appendChild(entry);
+            logContainer.scrollTop = logContainer.scrollHeight;
+
+            // 同时输出到浏览器控制台
+            console.log(`[${type.toUpperCase()}] ${message}`);
+        }
+
+        function clearLogs() {
+            document.getElementById('log-container').innerHTML = '';
+            log('日志已清空', 'info');
+        }
+
+        function updateMetric(id, value) {
+            document.getElementById(id).textContent = value;
+        }
+
+        function floatTo16BitPCM(float32Array) {
+            const buffer = new ArrayBuffer(float32Array.length * 2);
+            const view = new DataView(buffer);
+
+            for (let i = 0; i < float32Array.length; i++) {
+                const s = Math.max(-1, Math.min(1, float32Array[i]));
+                view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+            }
+
+            return buffer;
+        }
+
+        async function startDebugRecording() {
+            const btn = document.getElementById('start-btn');
+
+            if (isRecording) {
+                // 停止录音
+                log('用户请求停止录音', 'info');
+                stopRecording();
+                btn.textContent = '开始调试录音';
+                btn.classList.remove('recording');
+                isRecording = false;
+                return;
+            }
+
+            try {
+                // 重置指标
+                framesSent = 0;
+                dataSent = 0;
+                segmentsReceived = 0;
+                audioDuration = 0;
+                updateMetric('frames-sent', 0);
+                updateMetric('data-sent', '0 KB');
+                updateMetric('segments-received', 0);
+                updateMetric('audio-duration', '0.0s');
+
+                log('====== 开始新的调试会话 ======', 'info');
+
+                // 1. 创建测试会议
+                const backendUrl = document.getElementById('backend-url').value;
+                log(`步骤1: 创建测试会议 (后端: ${backendUrl})`, 'info');
+
+                const meetingResponse = await fetch(`${backendUrl}/meetings`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ title: '音频调试会话' })
+                });
+
+                if (!meetingResponse.ok) {
+                    throw new Error(`创建会议失败: ${meetingResponse.status}`);
+                }
+
+                const meeting = await meetingResponse.json();
+                log(`✓ 会议创建成功: ${meeting.id}`, 'success');
+
+                // 2. 请求麦克风权限
+                log('步骤2: 请求麦克风权限', 'info');
+                mediaStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        sampleRate: { ideal: 16000 },
+                        channelCount: 1,
+                        echoCancellation: true,
+                        noiseSuppression: { ideal: false },
+                        autoGainControl: { ideal: false }
+                    }
+                });
+                log('✓ 麦克风权限已获取', 'success');
+
+                // 3. 创建AudioContext
+                log('步骤3: 初始化AudioContext', 'info');
+                audioContext = new AudioContext({ sampleRate: 16000 });
+                await audioContext.resume();
+
+                const actualSampleRate = audioContext.sampleRate;
+                updateMetric('sample-rate', `${actualSampleRate} Hz`);
+                log(`✓ AudioContext已创建 (采样率: ${actualSampleRate} Hz)`, 'success');
+
+                // 4. 连接WebSocket
+                const wsUrl = `${backendUrl.replace('http://', 'ws://').replace('https://', 'wss://')}/meetings/${meeting.id}/transcribe/realtime?sample_rate=${actualSampleRate}`;
+                log(`步骤4: 连接WebSocket: ${wsUrl}`, 'info');
+
+                ws = new WebSocket(wsUrl);
+                updateMetric('ws-status', '连接中...');
+
+                ws.onopen = () => {
+                    log('✓ WebSocket连接已建立', 'success');
+                    updateMetric('ws-status', '已连接');
+                };
+
+                ws.onmessage = (event) => {
+                    try {
+                        const data = JSON.parse(event.data);
+                        log(`收到服务器消息: type=${data.type}`, 'info');
+
+                        if (data.type === 'session_started') {
+                            log(`✓ 会话已启动 - VAD配置: aggressiveness=${data.config?.vad_aggressiveness}, speech_ratio=${data.config?.min_speech_ratio}`, 'success');
+                            startAudioProcessing();
+                        } else if (data.type === 'transcription') {
+                            segmentsReceived += data.segments?.length || 0;
+                            updateMetric('segments-received', segmentsReceived);
+                            log(`✓ 收到转录结果: ${data.segments?.length} 个片段`, 'success');
+
+                            const resultsDiv = document.getElementById('transcription-results');
+                            data.segments?.forEach(seg => {
+                                const segDiv = document.createElement('div');
+                                segDiv.className = 'status success';
+                                segDiv.textContent = `[${seg.start.toFixed(2)}s - ${seg.end.toFixed(2)}s] ${seg.text}`;
+                                resultsDiv.appendChild(segDiv);
+                            });
+                        } else if (data.type === 'error') {
+                            log(`✗ 服务器错误: ${data.message}`, 'error');
+                        } else if (data.type === 'config_applied') {
+                            log(`✓ VAD配置已应用`, 'success');
+                        }
+                    } catch (err) {
+                        log(`解析WebSocket消息失败: ${err.message}`, 'error');
+                    }
+                };
+
+                ws.onerror = (error) => {
+                    log('✗ WebSocket错误', 'error');
+                    updateMetric('ws-status', '错误');
+                };
+
+                ws.onclose = (event) => {
+                    log(`WebSocket已关闭 (code: ${event.code}, reason: ${event.reason || '无'})`, 'warning');
+                    updateMetric('ws-status', '已断开');
+                };
+
+                btn.textContent = '停止录音';
+                btn.classList.add('recording');
+                isRecording = true;
+                startTime = Date.now();
+
+            } catch (error) {
+                log(`✗ 初始化失败: ${error.message}`, 'error');
+                console.error(error);
+                stopRecording();
+            }
+        }
+
+        function startAudioProcessing() {
+            log('步骤5: 开始音频处理', 'info');
+
+            const source = audioContext.createMediaStreamSource(mediaStream);
+
+            // 使用ScriptProcessor作为后备方案(更稳定)
+            const bufferSize = 4096;
+            processorNode = audioContext.createScriptProcessor(bufferSize, 1, 1);
+
+            let frameCount = 0;
+
+            processorNode.onaudioprocess = (event) => {
+                if (!ws || ws.readyState !== WebSocket.OPEN) {
+                    return;
+                }
+
+                const inputData = event.inputBuffer.getChannelData(0);
+
+                // 转换为16位PCM
+                const pcmData = floatTo16BitPCM(inputData);
+
+                // 发送数据
+                try {
+                    ws.send(pcmData);
+
+                    framesSent++;
+                    dataSent += pcmData.byteLength;
+                    audioDuration = (Date.now() - startTime) / 1000;
+
+                    // 每50帧更新一次UI
+                    if (framesSent % 50 === 0) {
+                        updateMetric('frames-sent', framesSent);
+                        updateMetric('data-sent', `${(dataSent / 1024).toFixed(2)} KB`);
+                        updateMetric('audio-duration', `${audioDuration.toFixed(1)}s`);
+                        log(`已发送音频: ${framesSent} 帧, ${(dataSent/1024).toFixed(2)} KB`, 'info');
+                    }
+                } catch (err) {
+                    log(`✗ 发送音频数据失败: ${err.message}`, 'error');
+                }
+            };
+
+            source.connect(processorNode);
+            processorNode.connect(audioContext.destination);
+
+            log('✓ 音频处理流水线已建立 (使用ScriptProcessor)', 'success');
+            log('开始捕获和发送音频数据...', 'info');
+        }
+
+        function stopRecording() {
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+
+            if (processorNode) {
+                try {
+                    processorNode.disconnect();
+                } catch (e) {}
+                processorNode = null;
+            }
+
+            if (audioContext && audioContext.state !== 'closed') {
+                audioContext.close();
+                audioContext = null;
+            }
+
+            if (mediaStream) {
+                mediaStream.getTracks().forEach(track => track.stop());
+                mediaStream = null;
+            }
+
+            updateMetric('ws-status', '未连接');
+            log('录音已停止，所有资源已释放', 'warning');
+        }
+    </script>
+</body>
+</html>

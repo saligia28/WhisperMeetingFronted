@@ -20,8 +20,8 @@ export interface VadConfig {
 }
 
 export const DEFAULT_VAD_CONFIG: VadConfig = {
-  aggressiveness: 2,
-  speechRatio: 50,
+  aggressiveness: 1,  // 降低到1，更容易检测到语音
+  speechRatio: 30,    // 降低到30%，更容易触发转录
 };
 
 export const VAD_AGGRESSIVENESS_LABELS = ["松散", "一般", "平衡", "严格"] as const;

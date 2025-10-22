@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { MicrophoneIcon, PauseIcon, PlayIcon, StopIcon } from "@heroicons/react/24/solid";
 import clsx from "clsx";
 
@@ -7,6 +7,86 @@ import type { VadConfig } from "../types/vad";
 import { DEFAULT_VAD_CONFIG } from "../types/vad";
 import { Panel } from "./Panel";
 import { VadSettingsDrawer, VadSettingsFab } from "./VadSettingsDrawer";
+
+interface AudioLevelIndicatorProps {
+  level: number;
+  active: boolean;
+}
+
+function AudioLevelIndicator({ level, active }: AudioLevelIndicatorProps) {
+  const clamped = Math.max(0, Math.min(1, level));
+  const segments = 12;
+  const loudnessPercent = Math.round(clamped * 100);
+  const statusLabel = active
+    ? loudnessPercent >= 70
+      ? "输入良好"
+      : loudnessPercent >= 40
+        ? "请靠近一点"
+        : "几乎静音"
+    : "待检测";
+  const statusTone = !active
+    ? "text-slate-500"
+    : loudnessPercent >= 70
+      ? "text-emerald-700"
+      : loudnessPercent >= 40
+        ? "text-amber-600"
+        : "text-slate-500";
+
+  return (
+    <div
+      role="status"
+      aria-label={active ? `当前音量约为 ${loudnessPercent}%` : "麦克风待检测"}
+      className={clsx(
+        "relative flex w-[220px] shrink-0 items-center gap-3 rounded-full border px-4 py-2 text-slate-600 transition-all duration-200",
+        active ? "border-emerald-200 bg-emerald-50/70 shadow-[0_0_0_1px_rgba(16,185,129,0.08)]" : "border-slate-200 bg-white",
+      )}
+    >
+      <span
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 rounded-full bg-gradient-to-r from-emerald-200/0 via-emerald-200/40 to-emerald-200/0 transition-opacity duration-300"
+        style={{ opacity: active ? 0.15 + clamped * 0.25 : 0 }}
+      />
+      <span
+        className={clsx(
+          "relative z-10 inline-flex h-2.5 w-2.5 items-center justify-center rounded-full transition-all duration-200",
+          active ? "bg-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.6)]" : "bg-slate-300",
+        )}
+        style={{ boxShadow: active ? `0 0 ${6 + clamped * 10}px rgba(16,185,129,0.5)` : undefined }}
+      />
+      <div className="relative z-10 flex flex-1 items-center gap-3">
+        <div className="flex h-10 flex-1 items-end gap-[3px]">
+          {Array.from({ length: segments }).map((_, idx) => {
+            const segmentProgress = active ? Math.min(1, Math.max(0, clamped * segments - idx)) : 0;
+            const baseHeight = 6 + idx * 2.2;
+            const color =
+              segmentProgress >= 0.75
+                ? "linear-gradient(180deg, #34d399 0%, #059669 100%)"
+                : segmentProgress >= 0.35
+                  ? "linear-gradient(180deg, #fbbf24 0%, #d97706 100%)"
+                  : "linear-gradient(180deg, #e2e8f0 0%, #cbd5f5 100%)";
+            return (
+              <span
+                key={idx}
+                aria-hidden="true"
+                className="w-1.5 rounded-full transition-all duration-150 ease-out"
+                style={{
+                  height: `${baseHeight + segmentProgress * 16}px`,
+                  transform: `scaleY(${0.45 + segmentProgress * 0.75})`,
+                  opacity: segmentProgress > 0 ? 0.25 + segmentProgress * 0.75 : 0.15,
+                  background: color,
+                  willChange: "transform",
+                }}
+              />
+            );
+          })}
+        </div>
+        <span className={clsx("w-[64px] text-[11px] font-medium tracking-tight text-right", statusTone)}>
+          {statusLabel}
+        </span>
+      </div>
+    </div>
+  );
+}
 
 interface RecorderPanelProps {
   meeting?: Meeting | null;
@@ -21,6 +101,9 @@ interface RecorderPanelProps {
   controlsDisabled?: boolean;
   stopAndUploadLabel?: string;
   mode?: "websocket" | "upload";
+  initialVadSettings?: VadConfig;
+  onVadSettingsChange?: (settings: VadConfig) => void;
+  audioLevel?: number;
 }
 
 export function RecorderPanel({
@@ -36,17 +119,38 @@ export function RecorderPanel({
   controlsDisabled = false,
   stopAndUploadLabel = "停止 & 上载",
   mode = "upload",
+  initialVadSettings,
+  onVadSettingsChange,
+  audioLevel = 0,
 }: RecorderPanelProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const isMeetingReady = Boolean(meeting);
   const controlsLocked = controlsDisabled || !isMeetingReady;
 
-  // VAD settings state
-  const [vadSettings, setVadSettings] = useState<VadConfig>(DEFAULT_VAD_CONFIG);
+  // VAD settings state - initialize from prop or use default
+  const [vadSettings, setVadSettings] = useState<VadConfig>(
+    initialVadSettings ?? DEFAULT_VAD_CONFIG
+  );
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [settingsLocked, setSettingsLocked] = useState(false);
 
+  // Sync with external settings when they change
+  useEffect(() => {
+    if (initialVadSettings && !settingsLocked) {
+      setVadSettings(initialVadSettings);
+    }
+  }, [initialVadSettings, settingsLocked]);
+
+  const handleVadSettingsChange = (newSettings: VadConfig) => {
+    setVadSettings(newSettings);
+    // Persist to backend if callback provided
+    onVadSettingsChange?.(newSettings);
+  };
+
   const isRealtimeMode = mode === "websocket";
+
+  // Debug: log mode and realtime status
+  // console.log('[RecorderPanel] mode:', mode, 'isRealtimeMode:', isRealtimeMode);
 
   const meetingLabel = useMemo(() => {
     if (!isMeetingReady || !meeting) {
@@ -87,6 +191,12 @@ export function RecorderPanel({
   const importDisabled = controlsLocked;
   const uploadLatestDisabled = controlsLocked || busy;
   const showStopUploadButton = !isRealtimeMode;
+  const audioMeterActive =
+    recorderState === "recording" ||
+    recorderState === "connecting" ||
+    recorderState === "connected" ||
+    isRecording;
+  const clampedAudioLevel = Math.max(0, Math.min(1, audioLevel));
 
   const handleStartRecording = () => {
     if (startStopDisabled) return;
@@ -108,7 +218,8 @@ export function RecorderPanel({
   };
 
   return (
-    <Panel
+    <>
+      <Panel
       title="录音控制"
       description="开启实时记录或导入历史音频，支持自动调用转写流水线"
       action={
@@ -154,6 +265,7 @@ export function RecorderPanel({
               />
               {isRecording ? <StopIcon className="h-6 w-6" /> : <MicrophoneIcon className="h-6 w-6" />}
             </button>
+            <AudioLevelIndicator level={clampedAudioLevel} active={audioMeterActive && !controlsLocked} />
             {showStopUploadButton ? (
               <button
                 type="button"
@@ -230,20 +342,22 @@ export function RecorderPanel({
         {error ? <p className="rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-600">{error}</p> : null}
       </div>
 
-      {/* VAD Settings - only show in realtime mode */}
-      {isRealtimeMode ? (
-        <>
-          <VadSettingsFab onClick={() => setDrawerOpen(true)} disabled={false} />
-          <VadSettingsDrawer
-            open={drawerOpen}
-            onOpenChange={setDrawerOpen}
-            aggressiveness={vadSettings.aggressiveness}
-            speechRatio={vadSettings.speechRatio}
-            locked={settingsLocked}
-            onChange={setVadSettings}
-          />
-        </>
-      ) : null}
-    </Panel>
+      {/* VAD Settings Drawer - only show in realtime mode */}
+      {isRealtimeMode && (
+        <VadSettingsDrawer
+          open={drawerOpen}
+          onOpenChange={setDrawerOpen}
+          aggressiveness={vadSettings.aggressiveness}
+          speechRatio={vadSettings.speechRatio}
+          locked={settingsLocked}
+          onChange={handleVadSettingsChange}
+        />
+      )}
+      </Panel>
+      {/* VAD Settings FAB - render outside Panel to avoid positioning context issues */}
+      {isRealtimeMode && (
+        <VadSettingsFab onClick={() => setDrawerOpen(true)} disabled={false} />
+      )}
+    </>
   );
 }

@@ -1,5 +1,6 @@
 import { mockMeetings, mockSegments, mockSummary } from "../mockData";
 import type { Meeting, MeetingSummary, TranscriptSegment } from "../types";
+import type { VadConfig } from "../types/vad";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
 const allowMocks = (import.meta.env.VITE_ENABLE_MOCK_FALLBACK ?? "false") === "true";
@@ -9,6 +10,11 @@ type TranscriptApiSegment = {
   end: number;
   text: string;
   speaker?: string | null;
+};
+
+type UserSettingsResponse = {
+  vad_aggressiveness: number;
+  min_speech_ratio: number;
 };
 
 async function safeFetch<T>(input: RequestInfo | URL, init?: RequestInit, fallback?: () => T): Promise<T> {
@@ -186,4 +192,47 @@ export function extractSection(markdown: string, heading: string): string[] {
     .filter(Boolean);
 
   return lines;
+}
+
+/**
+ * Get current user's VAD settings from backend
+ */
+export async function getUserSettings(): Promise<VadConfig> {
+  const response = await fetch(`${API_BASE_URL}/user/settings`);
+
+  if (!response.ok) {
+    // Return default settings if fetch fails
+    console.warn("[api] Failed to load user settings, using defaults");
+    return { aggressiveness: 1, speechRatio: 30 };  // 与DEFAULT_VAD_CONFIG保持一致
+  }
+
+  const data: UserSettingsResponse = await response.json();
+  return {
+    aggressiveness: data.vad_aggressiveness,
+    speechRatio: data.min_speech_ratio * 100, // Convert 0.5 -> 50
+  };
+}
+
+/**
+ * Update user's VAD settings on backend
+ */
+export async function updateUserSettings(config: VadConfig): Promise<VadConfig> {
+  const response = await fetch(`${API_BASE_URL}/user/settings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      vad_aggressiveness: config.aggressiveness,
+      min_speech_ratio: config.speechRatio / 100, // Convert 50 -> 0.5
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Update user settings failed with status ${response.status}`);
+  }
+
+  const data: UserSettingsResponse = await response.json();
+  return {
+    aggressiveness: data.vad_aggressiveness,
+    speechRatio: data.min_speech_ratio * 100,
+  };
 }

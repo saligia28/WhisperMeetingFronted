@@ -49,6 +49,7 @@ export function useRealtimeTranscription({
   const [receivedSegments, setReceivedSegments] = useState<TranscriptSegment[]>([]);
   const [totalDuration, setTotalDuration] = useState<number>(0);
   const [dataSize, setDataSize] = useState<number>(0);
+  const [audioLevel, setAudioLevel] = useState<number>(0);
 
   // WebSocket and Audio refs
   const websocketRef = useRef<WebSocket | null>(null);
@@ -62,6 +63,8 @@ export function useRealtimeTranscription({
   const configAppliedRef = useRef(false);
   const inputSampleRateRef = useRef<number | null>(null);
   const effectiveSampleRateRef = useRef<number>(sampleRate);
+  const levelValueRef = useRef(0);
+  const lastLevelUpdateRef = useRef(0);
 
   // Cleanup function
   const cleanup = useCallback(() => {
@@ -74,6 +77,9 @@ export function useRealtimeTranscription({
     configAppliedRef.current = false;
     inputSampleRateRef.current = null;
     effectiveSampleRateRef.current = sampleRate;
+    levelValueRef.current = 0;
+    lastLevelUpdateRef.current = 0;
+    setAudioLevel(0);
 
     // Close WebSocket
     if (websocketRef.current) {
@@ -199,6 +205,9 @@ export function useRealtimeTranscription({
       pendingConfigRef.current = vadConfig ?? null;
       configAppliedRef.current = false;
       inputSampleRateRef.current = null;
+      levelValueRef.current = 0;
+      lastLevelUpdateRef.current = 0;
+      setAudioLevel(0);
 
       // Get microphone access
       // Disable aggressive noise suppression and auto gain control to prevent voice distortion
@@ -369,6 +378,25 @@ export function useRealtimeTranscription({
       };
 
       const handleAudioFrame = (inputData: Float32Array) => {
+        // Update audio level feedback regardless of WebSocket readiness
+        if (inputData.length > 0) {
+          let sumSquares = 0;
+          for (let i = 0; i < inputData.length; i++) {
+            const sample = inputData[i];
+            sumSquares += sample * sample;
+          }
+          const rms = Math.sqrt(sumSquares / inputData.length);
+          const normalized = Math.min(1, rms * 3.5);
+          const smoothed = levelValueRef.current * 0.75 + normalized * 0.25;
+          levelValueRef.current = smoothed;
+
+          const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+          if (now - lastLevelUpdateRef.current > 80) {
+            lastLevelUpdateRef.current = now;
+            setAudioLevel(smoothed);
+          }
+        }
+
         if (!ws || ws.readyState !== WebSocket.OPEN) {
           return;
         }
@@ -453,6 +481,7 @@ export function useRealtimeTranscription({
     console.log("[useRealtimeTranscription] Stopping recording");
     cleanup();
     setState("idle");
+    setAudioLevel(0);
   }, [cleanup]);
 
   // Check browser support
@@ -473,5 +502,6 @@ export function useRealtimeTranscription({
     dataSize,
     startRecording,
     stopRecording,
+    audioLevel,
   };
 }

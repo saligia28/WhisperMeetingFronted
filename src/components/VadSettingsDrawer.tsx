@@ -42,7 +42,7 @@ export function VadSettingsDrawer({
 
   return (
     <Transition.Root show={open} as={Fragment}>
-      <Dialog as="div" className="relative z-50" onClose={() => !locked && onOpenChange(false)}>
+      <Dialog as="div" className="relative z-50" onClose={() => onOpenChange(false)}>
         {/* Backdrop */}
         <Transition.Child
           as={Fragment}
@@ -83,8 +83,11 @@ export function VadSettingsDrawer({
                         <div className="ml-3 flex h-7 items-center">
                           <button
                             type="button"
-                            disabled={locked}
-                            className="rounded-md text-slate-400 hover:text-slate-500 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-40"
+                            aria-disabled={locked}
+                            className={clsx(
+                              "rounded-md text-slate-400 hover:text-slate-500 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2",
+                              locked && "opacity-40 hover:text-slate-400"
+                            )}
                             onClick={() => onOpenChange(false)}
                           >
                             <span className="sr-only">关闭</span>
